@@ -1,6 +1,6 @@
 # 📊 Go Ad Tracking & Analytics System
 
-A high-performance** ****Ad Click Tracking & Analytics** service built with** ** **Go** ,** ** **Kafka** , and** ** **Prometheus** , designed for** ** **real-time click tracking** ,** ** **scalable event processing** , and** ** **detailed analytics** .
+A high-performance **Ad Click Tracking & Analytics** service built with **Go**, **Kafka**, and **Prometheus**, designed for **real-time click tracking**, **scalable event processing**, and **detailed analytics**.
 
 ## 🚀 Features
 
