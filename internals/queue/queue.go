@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/segmentio/kafka-go"
+	"github.com/sony/gobreaker"
 )
 
 // ClickEvent is the payload for click tracking.
@@ -32,10 +33,28 @@ type Producer struct {
 
 // Global producer instance with thread safety
 var (
-	globalProducer *Producer
-	producerMutex  sync.RWMutex
-	isInitialized  bool
+	globalProducer      *Producer
+	producerMutex       sync.RWMutex
+	isInitialized       bool
+	kafkaCircuitBreaker *gobreaker.CircuitBreaker
 )
+
+func init() {
+	settings := gobreaker.Settings{
+		Name:        "KafkaPublishCircuitBreaker",
+		MaxRequests: 5,
+		Interval:    60 * time.Second,
+		Timeout:     10 * time.Second,
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			return counts.ConsecutiveFailures > 5 ||
+				(counts.Requests >= 10 && counts.TotalFailures*2 >= counts.Requests)
+		},
+		OnStateChange: func(name string, from, to gobreaker.State) {
+			log.Printf("Circuit breaker state changed: %s from %v to %v\n", name, from, to)
+		},
+	}
+	kafkaCircuitBreaker = gobreaker.NewCircuitBreaker(settings)
+}
 
 // InitGlobalProducer initializes the global Kafka producer - call this once at app startup
 func InitGlobalProducer(broker, topic string) error {
@@ -67,7 +86,7 @@ func InitGlobalProducer(broker, topic string) error {
 	return nil
 }
 
-// PublishClick sends a ClickEvent to Kafka using the global producer
+// PublishClick sends a ClickEvent to Kafka using the global producer with circuit breaker protection
 func PublishClick(ctx context.Context, event ClickEvent) error {
 	producerMutex.RLock()
 	producer := globalProducer
@@ -78,10 +97,24 @@ func PublishClick(ctx context.Context, event ClickEvent) error {
 		return errors.New("kafka producer is not initialized - call InitGlobalProducer first")
 	}
 
-	return producer.publishClick(ctx, event)
+	_, err := kafkaCircuitBreaker.Execute(func() (interface{}, error) {
+		return nil, producer.publishClick(ctx, event)
+	})
+
+	if err != nil {
+		if errors.Is(err, gobreaker.ErrOpenState) {
+			return fmt.Errorf("circuit breaker is open, skipping kafka publish")
+		}
+		if errors.Is(err, gobreaker.ErrTooManyRequests) {
+			return fmt.Errorf("too many requests, circuit breaker limiting calls")
+		}
+		return err
+	}
+
+	return nil
 }
 
-// publishClick is the internal method that does the actual publishing
+// publishClick is the internal method that does the actual publishing with retry logic
 func (p *Producer) publishClick(ctx context.Context, event ClickEvent) error {
 	if p.writer == nil {
 		return errors.New("kafka writer is not initialized")
@@ -92,20 +125,25 @@ func (p *Producer) publishClick(ctx context.Context, event ClickEvent) error {
 		return fmt.Errorf("failed to marshal click event: %w", err)
 	}
 
-	// Create timeout context if one doesn't already exist
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if err := p.writer.WriteMessages(timeoutCtx, kafka.Message{
-		Key:   []byte(event.EventID.String()),
-		Value: msg,
-		Time:  time.Now(),
-	}); err != nil {
-		return fmt.Errorf("failed to publish click event: %w", err)
+	var lastErr error
+	for i := range 3 {
+		err = p.writer.WriteMessages(timeoutCtx, kafka.Message{
+			Key:   []byte(event.EventID.String()),
+			Value: msg,
+			Time:  time.Now(),
+		})
+		if err == nil {
+			log.Printf("📤 Click event published: AdID=%d, EventID=%s\n", event.AdID, event.EventID.String())
+			return nil
+		}
+		lastErr = err
+		time.Sleep(time.Duration(i+1) * 100 * time.Millisecond) // exponential backoff
 	}
 
-	log.Printf("📤 Click event published: AdID=%d, EventID=%s\n", event.AdID, event.EventID.String())
-	return nil
+	return fmt.Errorf("failed to publish click event after retries: %w", lastErr)
 }
 
 // CloseGlobalProducer closes the global producer - call this at app shutdown

@@ -11,8 +11,6 @@ import (
 	"go.uber.org/zap"
 )
 
-
-
 type Service interface {
 	RecordClick(data ClickRequestData) error
 }
@@ -42,20 +40,38 @@ func (s *clickService) RecordClick(data ClickRequestData) error {
 	}
 
 	go func(ev queue.ClickEvent) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := queue.PublishClick(ctx, ev); err != nil {
-			observability.Logger.Error("Failed to publish click to Kafka",
+		maxRetries := 5
+		retryInterval := time.Second
+
+		for i := range maxRetries {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := queue.PublishClick(ctx, ev)
+			cancel()
+
+			if err == nil {
+				observability.Logger.Debug("Click published to Kafka",
+					zap.Uint("ad_id", ev.AdID),
+					zap.String("event_id", ev.EventID.String()),
+				)
+				return // success, exit retry loop
+			}
+
+			observability.Logger.Warn("Failed to publish click to Kafka, retrying",
 				zap.Error(err),
 				zap.Uint("ad_id", ev.AdID),
 				zap.String("event_id", ev.EventID.String()),
+				zap.Int("attempt", i+1),
 			)
-		} else {
-			observability.Logger.Debug("Click published to Kafka",
-				zap.Uint("ad_id", ev.AdID),
-				zap.String("event_id", ev.EventID.String()),
-			)
+
+			// Exponential backoff
+			time.Sleep(retryInterval)
+			retryInterval *= 2
 		}
+
+		observability.Logger.Error("Exhausted retries, failed to publish click to Kafka",
+			zap.Uint("ad_id", ev.AdID),
+			zap.String("event_id", ev.EventID.String()),
+		)
 	}(event)
 
 	return nil
