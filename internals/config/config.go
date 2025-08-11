@@ -1,6 +1,7 @@
 package config
 
 import (
+	"lystage-proj/internals/observability"
 	"os"
 
 	"github.com/joho/godotenv"
@@ -16,7 +17,7 @@ type Config struct {
 
 func Load() *Config {
 	// Load .env if present (only for local/dev)
-	_ = godotenv.Load("/Users/arjune/Documents/lvstage/.env")
+	_ = godotenv.Load(".env")
 
 	cfg := &Config{
 		DatabaseURL: getEnv("DATABASE_URL", ""),
@@ -25,7 +26,7 @@ func Load() *Config {
 		KafkaBroker: getEnv("KAFKA_BROKER", "localhost:9092"),
 		ClicksTopic: getEnv("CLICKS_TOPIC", "click-events"),
 	}
-	// observability.Logger.Info(cfg.DatabaseURL)
+	observability.Logger.Info(cfg.DatabaseURL)
 	return cfg
 }
 
